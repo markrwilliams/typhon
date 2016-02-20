@@ -40,13 +40,12 @@ def makeModuleConfiguration(module :DeepFrozen,
 
 def main():
 
-    def valMap := [].asMap().diverge()
     def collectedTests := [].diverge()
     def collectedBenches := [].diverge()
     object testCollector:
         to get(locus):
             return def testBucket(tests):
-                for t in tests:
+                for t in (tests):
                     collectedTests.push([locus, t])
 
     object benchCollector:
@@ -54,9 +53,10 @@ def main():
             return def benchBucket(aBench, name :Str):
                 collectedBenches.push([`$locus: $name`, aBench])
 
-    object loader:
+    def makeLoader(imports):
+        return object loader:
             to "import"(name):
-                return valMap[name]
+                return imports[name]
 
     def subload(modname, depMap,
                 => collectTests := false,
@@ -64,14 +64,14 @@ def main():
         if (modname == "unittest"):
             if (collectTests):
                 trace(`test collector invoked`)
-                return valMap["unittest"] := ["unittest" => testCollector[modname]]
+                return [["unittest" => ["unittest" => testCollector[modname]]], null]
             else:
-                return valMap["unittest"] := ["unittest" => fn _ {null}]
+                return [["unittest" => ["unittest" => fn _ {null}]], null]
         if (modname == "bench"):
             if (collectBenchmarks):
-                return valMap["bench"] := ["bench" => benchCollector[modname]]
+                return [["bench" => ["bench" => benchCollector[modname]]], null]
             else:
-                return valMap["bench"] := ["bench" => fn _, _ {null}]
+                return [["bench" => ["bench" => fn _, _ {null}]], null]
 
         def fname := _findTyphonFile(modname)
         if (fname == null):
@@ -92,9 +92,12 @@ def main():
                                              subload(d, depMap, => collectTests,
                                                      => collectBenchmarks)])
             when (deps) ->
+                var imports := [].asMap()
+                for [importable, _] in (deps):
+                    imports |= importable
                 # Fill in the module configuration.
                 def depNames := config.dependencyNames()
-                for depName in depNames:
+                for depName in (depNames):
                     if (depMap.contains(depName)):
                         def dep := depMap[depName]
                         # If the dependency is DF, then add it to the map.
@@ -108,10 +111,10 @@ def main():
                 # Update the dependency map with the latest config.
                 depMap[modname] := config
                 def pre := collectedTests.size()
-                valMap[modname] := config(loader)
+                def module := config(makeLoader(imports))
                 if (collectTests):
                     traceln(`collected ${collectedTests.size() - pre} tests`)
-                [valMap[modname], config]
+                [[modname => module], config]
 
     def args := currentProcess.getArguments().slice(2)
     def usage := "Usage: loader run <modname> <args> | loader test <modname>"
@@ -120,14 +123,16 @@ def main():
     switch (args):
         match [=="run", modname] + subargs:
             def exps := subload(modname, [].asMap().diverge())
-            def excludes := ["typhonEval", "_findTyphonFile", "bench"]
-            def unsafeScopeValues := [for `&&@n` => &&v in (unsafeScope)
-                                      if (!excludes.contains(n))
-                                      n => v].with("packageLoader", loader)
             return when (exps) ->
+                def excludes := ["typhonEval", "_findTyphonFile", "bench"]
+                def [module, _] := exps
+                def unsafeScopeValues := [for `&&@n` => &&v in (unsafeScope)
+                                          if (!excludes.contains(n))
+                                          n => v].with("packageLoader", makeLoader(module))
+
                 # We don't care about config or anything that isn't the
                 # entrypoint named `main`.
-                def [[=> main] | _, _] := exps
+                def [(modname) => [=> main] | _] := module
                 M.call(main, "run", [subargs], unsafeScopeValues)
         match [=="dot", modname] + subargs:
             def tubes := subload("lib/tubes", [].asMap().diverge())
@@ -149,7 +154,7 @@ def main():
                     def stack := [[modname, topConfig]].diverge()
                     while (stack.size() != 0):
                         def [name, config] := stack.pop()
-                        for depName => depConfig in config.dependencyMap():
+                        for depName => depConfig in (config.dependencyMap()):
                             stdout.receive(`  "$name" -> "$depName";$\n`)
                             if (depConfig != moduleGraphUnsatisfiedExit &&
                                 depConfig != moduleGraphLiveExit):
@@ -158,25 +163,27 @@ def main():
                     # Success!
                     0
         match [=="test"] + modnames:
+            def testRunnerName := "testRunner"
+            def tubesName := "lib/tubes"
             def someMods := promiseAllFulfilled(
                 [for modname in (modnames)
                  subload(modname, [].asMap().diverge(),
                          "collectTests" => true)] +
-                [(def testRunner := subload(
-                    "testRunner",
+                [(def testRunnerModuleAndConfig := subload(
+                    testRunnerName,
                     [].asMap().diverge())),
-                 (def tubes := subload(
-                     "lib/tubes",
+                 (def tubesModuleAndConfig := subload(
+                     tubesName,
                      [].asMap().diverge()))])
             return when (someMods) ->
-                def [[=> makeIterFount,
-                      => makeUTF8EncodePump,
-                      => makePumpTube
-                ] | _, _] := tubes
-                def [[=> makeAsserter,
-                      => makeTestDrain,
-                      => runTests
-                ] | _, _] := testRunner
+                def [[(tubesName) => tubes] | _, _] := tubesModuleAndConfig
+                def [=> makeIterFount,
+                     => makeUTF8EncodePump,
+                     => makePumpTube] | _ := tubes
+                def [[(testRunnerName) => testRunner] | _, _] := testRunnerModuleAndConfig
+                def [=> makeAsserter,
+                     => makeTestDrain,
+                     => runTests] | _ := testRunner
 
                 def stdout := makePumpTube(makeUTF8EncodePump())
                 stdout <- flowTo(makeStdOut())
@@ -188,21 +195,23 @@ def main():
                     def fails := asserter.fails()
                     stdout.receive(`${asserter.total()} tests run, $fails failures$\n`)
                     # Exit code: Only returns 0 if there were 0 failures.
-                    for loc => errors in asserter.errors():
+                    for loc => errors in (asserter.errors()):
                         stdout.receive(`In $loc:$\n`)
-                        for error in errors:
+                        for error in (errors):
                             stdout.receive(`~ $error$\n`)
                     fails.min(1)
         match [=="bench"] + modnames:
+            def benchRunnerName := "benchRunner"
             def someMods := promiseAllFulfilled(
                 [for modname in (modnames)
                  subload(modname, [].asMap().diverge(),
                          "collectBenchmarks" => true)] +
-                [(def benchRunner := subload(
-                    "benchRunner",
+                [(def benchRunnerModuleAndConfig := subload(
+                    benchRunnerName,
                     [].asMap().diverge()))])
             return when (someMods) ->
-                def [[=> runBenchmarks] | _, _] := benchRunner
+                def [[(benchRunnerName) => benchRunner] | _, _] := benchRunnerModuleAndConfig
+                def [=> runBenchmarks] | _ := benchRunner
                 when (runBenchmarks(collectedBenches, bench,
                                     makeFileResource("bench.html"))) ->
                     traceln(`Benchmark report written to bench.html.`)
