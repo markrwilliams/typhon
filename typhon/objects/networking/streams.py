@@ -106,15 +106,7 @@ class StreamFount(Object):
 
     def recv(self, atom, args):
         if atom is FLOWTO_1:
-            self._drain = args[0]
-            # We can't actually call receive/1 on the drain until
-            # flowingFrom/1 has been called, *but* flush/0 will be queued in a
-            # subsequent send to the the one queued here, so we're fine as far
-            # as ordering. ~ C.
-            from typhon.objects.collections.maps import EMPTY_MAP
-            rv = self.vat.send(self._drain, FLOWINGFROM_1, [self], EMPTY_MAP)
-            self.considerFlush()
-            return rv
+            return self.registerDrain(args[0])
 
         if atom is PAUSEFLOW_0:
             return self.pause()
@@ -132,6 +124,17 @@ class StreamFount(Object):
             return NullObject
 
         raise Refused(self, atom, args)
+
+    def registerDrain(self, drain):
+        self._drain = drain
+        # We can't actually call receive/1 on the drain until
+        # flowingFrom/1 has been called, *but* flush/0 will be queued in a
+        # subsequent send to the the one queued here, so we're fine as far
+        # as ordering. ~ C.
+        from typhon.objects.collections.maps import EMPTY_MAP
+        rv = self.vat.send(self._drain, FLOWINGFROM_1, [self], EMPTY_MAP)
+        self.considerFlush()
+        return rv
 
     def abort(self, reason):
         if self._drain is not None:

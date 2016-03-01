@@ -11,6 +11,7 @@ from typhon.objects.collections.lists import ConstList, unwrapList
 from typhon.objects.collections.maps import ConstMap, monteMap, unwrapMap
 from typhon.objects.constants import NullObject
 from typhon.objects.data import BytesObject, IntObject, StrObject, unwrapBytes
+from typhon.objects.networking.streams import StreamDrain, StreamFount
 from typhon.objects.root import Object, runnable
 from typhon.objects.refs import makePromise
 from typhon.vats import currentVat, scopedVat
@@ -20,7 +21,7 @@ GETARGUMENTS_0 = getAtom(u"getArguments", 0)
 GETENVIRONMENT_0 = getAtom(u"getEnvironment", 0)
 GETPID_0 = getAtom(u"getPID", 0)
 INTERRUPT_0 = getAtom(u"interrupt", 0)
-RUN_3 = getAtom(u"run", 3)
+RUN_4 = getAtom(u"run", 4)
 WAIT_0 = getAtom(u"wait", 0)
 
 EXITSTATUS_0 = getAtom(u"exitStatus", 0)
@@ -88,6 +89,69 @@ class ProcessExitInformation(Object):
         raise Refused(self, atom, args)
 
 
+class IgnoredStandardIO(object):
+
+    def __init__(self, vat, container):
+        self.container = ruv.addSTDIOStream(container, None, ruv.UV_IGNORE)
+
+    def begin(self):
+        pass
+
+    def cleanup(self):
+        pass
+
+
+class StandardIn(object):
+    started = False
+
+    def __init__(self, vat, container, fount):
+        self.pipe = ruv.allocPipe()
+        ruv.pipeInit(vat.uv_loop, self.pipe, 0)
+
+        self.drain = StreamDrain(self.pipe, vat)
+        self.fount = fount
+
+        self.container = ruv.addSTDIOStream(
+            container, self.pipe, ruv.UV_CREATE_PIPE | ruv.UV_WRITABLE_PIPE)
+
+    def begin(self):
+        if not self.started:
+            self.started = True
+            # TODO: WRONG
+            self.fount.registerDrain(self.drain)
+
+    def cleanup(self):
+        self.drain.cleanup()
+
+
+class StandardOut(object):
+    started = False
+
+    def __init__(self, vat, container, drain):
+        self.pipe = ruv.allocPipe()
+        ruv.pipeInit(vat.uv_loop, self.pipe, 0)
+
+        self.fount = StreamFount(self.pipe, vat)
+        self.drain = drain
+
+        self.container = ruv.addSTDIOStream(
+            container, self.pipe, ruv.UV_CREATE_PIPE | ruv.UV_READABLE_PIPE)
+
+    def begin(self):
+        if not self.started:
+            self.started = True
+            self.fount.registerDrain(self.drain)
+
+    def cleanup(self):
+        self.fount.stop(u'exited')
+        self.fount = None
+
+
+class StandardError(StandardOut):
+    # lazy bones
+    pass
+
+
 @autohelp
 class SubProcess(Object):
     """
@@ -96,7 +160,8 @@ class SubProcess(Object):
     EMPTY_PID = -1
     EMPTY_EXIT_AND_SIGNAL = (-1, -1)
 
-    def __init__(self, vat, process, argv, env):
+    def __init__(self, vat, process, argv, env,
+                 stdinFount, stdoutDrain, stderrDrain):
         self.pid = self.EMPTY_PID
         self.process = process
         self.argv = argv
@@ -104,6 +169,30 @@ class SubProcess(Object):
         self.exit_and_signal = self.EMPTY_EXIT_AND_SIGNAL
         self.resolvers = []
         self.vat = vat
+
+        self.stdioContainers = ruv.allocSTDIOContainerArray(3)
+
+        if stdinFount:
+            self.stdin = StandardIn(self.vat,
+                                    self.stdioContainers[0],
+                                    stdinFount)
+        else:
+            self.stdin = IgnoredStandardIO(self.vat, self.stdioContainers[0])
+
+        if stdoutDrain:
+            self.stdout = StandardOut(self.vat,
+                                      self.stdioContainers[1],
+                                      stdoutDrain)
+        else:
+            self.stdout = IgnoredStandardIO(self.vat, self.stdioContainers[1])
+
+        if stderrDrain:
+            self.stderr = StandardError(self.vat,
+                                        self.stdioContainers[2],
+                                        stderrDrain)
+        else:
+            self.stderr = IgnoredStandardIO(self.vat, self.stdioContainers[2])
+
         ruv.stashProcess(process, (self.vat, self))
 
     def retrievePID(self):
@@ -162,11 +251,11 @@ class SubProcess(Object):
         raise Refused(self, atom, args)
 
 
-@runnable(RUN_3)
-def makeProcess(executable, args, environment):
+@runnable(RUN_4)
+def makeProcess(executable, args, environment, stdioMap):
     """
     Create a subordinate process on the current node from the given
-    executable, arguments, and environment.
+    executable, arguments, environment and stdioMap.
     """
 
     # Third incarnation: libuv-powered and requiring bytes.
@@ -183,13 +272,23 @@ def makeProcess(executable, args, environment):
         env[unwrapBytes(k)] = unwrapBytes(v)
     packedEnv = [k + '=' + v for (k, v) in env.items()]
 
+    stdio = unwrapMap(stdioMap)
+    stdinFount = stdio.get(StrObject(u"stdin"), None)
+    stdoutDrain = stdio.get(StrObject(u"stdout"), None)
+    stderrDrain = stdio.get(StrObject(u"stderr"), None)
+
     vat = currentVat.get()
     try:
         process = ruv.allocProcess()
-        sub = SubProcess(vat, process, argv, env)
+        sub = SubProcess(vat, process, argv, env,
+                         stdinFount, stdoutDrain, stderrDrain)
         ruv.spawn(vat.uv_loop, process,
-                  file=executable, args=argv, env=packedEnv)
+                  file=executable, args=argv, env=packedEnv,
+                  stdioContainers=sub.stdioContainers)
         sub.retrievePID()
+        sub.stdin.begin()
+        sub.stdout.begin()
+        sub.stderr.begin()
         return sub
     except ruv.UVError as uve:
         raise userError(u"makeProcess: Couldn't spawn process: %s" %
