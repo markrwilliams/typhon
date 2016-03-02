@@ -92,13 +92,15 @@ class ProcessExitInformation(Object):
 class IgnoredStandardIO(object):
 
     def __init__(self, vat, container):
-        self.container = ruv.addSTDIOStream(container, None, ruv.UV_IGNORE)
+        self.container = container
+        ruv.addSTDIOStream(container, None, ruv.UV_IGNORE)
 
     def begin(self):
         pass
 
     def cleanup(self):
-        pass
+        if self.container:
+            self.container = None
 
 
 class StandardIn(object):
@@ -111,7 +113,8 @@ class StandardIn(object):
         self.drain = StreamDrain(self.pipe, vat)
         self.fount = fount
 
-        self.container = ruv.addSTDIOStream(
+        self.container = container
+        ruv.addSTDIOStream(
             container, self.pipe, ruv.UV_CREATE_PIPE | ruv.UV_WRITABLE_PIPE)
 
     def begin(self):
@@ -121,7 +124,9 @@ class StandardIn(object):
             self.fount.registerDrain(self.drain)
 
     def cleanup(self):
-        self.drain.cleanup()
+        self.begin()
+        if self.conjtainer:
+            self.container = None
 
 
 class StandardOut(object):
@@ -134,7 +139,8 @@ class StandardOut(object):
         self.fount = StreamFount(self.pipe, vat)
         self.drain = drain
 
-        self.container = ruv.addSTDIOStream(
+        self.container = container
+        ruv.addSTDIOStream(
             container, self.pipe, ruv.UV_CREATE_PIPE | ruv.UV_READABLE_PIPE)
 
     def begin(self):
@@ -143,8 +149,9 @@ class StandardOut(object):
             self.fount.registerDrain(self.drain)
 
     def cleanup(self):
-        self.fount.stop(u'exited')
-        self.fount = None
+        self.begin()
+        if self.container:
+            self.container = None
 
 
 class StandardError(StandardOut):

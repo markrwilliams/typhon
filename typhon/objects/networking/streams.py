@@ -152,6 +152,7 @@ class StreamFount(Object):
 
     def cleanup(self):
         if not self._closed:
+            self.flush()
             self._closed = True
             # Release the drain. They should have released us as well.
             self._drain = None

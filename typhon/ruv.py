@@ -465,16 +465,10 @@ def allocSTDIOContainerArray(size):
 def processDiscard(process, exit_status, term_signal):
     vat, subprocess = unstashProcess(process)
     subprocess.exited(exit_status, term_signal)
-
-    # in case we didn't get a chance to run these
-    subprocess.stdin.begin()
-    subprocess.stdout.begin()
-    subprocess.stderr.begin()
-
     subprocess.stdin.cleanup()
     subprocess.stdout.cleanup()
     subprocess.stderr.cleanup()
-    # free(subprocess.stdioContainers)
+    free(subprocess.stdioContainers)
     free(process)
 
 
